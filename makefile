@@ -1,5 +1,4 @@
 SRC := \
-	main.c \
 	async.c \
 	setjmp.s \
 
@@ -8,10 +7,9 @@ LIBRARIES := -pthread
 CFLAGS         ?= -Og -ggdb3
 CC             ?= cc
 BUILDDIR       ?= out
-TARGET         ?= a.out
+TARGET         ?= badidea.a
 .DEFAULT_GOAL   = $(BUILDDIR)/$(TARGET)
 
-#OBJ = $(addprefix $(BUILDDIR)/,$(SRC:.c=.o:.s=.o))
 OBJ = $(addprefix $(BUILDDIR)/,$(patsubst %.c,%.o,$(patsubst %.s,%.o,$(SRC))))
 
 $(BUILDDIR):
@@ -38,6 +36,8 @@ $(BUILDDIR)/%.so: | $(BUILDDIR)
 	$(CC) -shared -o $@ $(DEFAULT_CFLAGS) $(CFLAGS) $(LIBRARIES) $^
 
 $(BUILDDIR)/$(TARGET): $(OBJ)
+$(BUILDDIR)/await: await.c $(BUILDDIR)/$(TARGET)
+$(BUILDDIR)/cancel: cancel.c $(BUILDDIR)/$(TARGET)
 
 .PHONY: clean
 clean:
