@@ -39,48 +39,68 @@ extern void longjmp2(ThreadState *state);
 static inline void sleepu(const u64 us)
 {
 	struct timespec ts = {0};
-	ts.tv_sec = us / 1000;
+	ts.tv_sec = us / (1000 * 1000);
 	ts.tv_nsec = (us % 1000) * 1000;
-	nanosleep(&ts, NULL);
+	nanosleep(&ts, &ts);
 }
 
-typedef struct AsyncState {
+typedef struct Async {
 	pthread_t id;
 	ThreadState loop;
 	ThreadState job;
 	u8 *stack;
 	bool has_job;
 	bool should_exit;
-} AsyncState;
+	bool initialized;
+} Async;
 
-extern void asyncInitInternal(void *_stack_base);
-static inline void asyncInit(void) // used to avoid stack offsets from call
+typedef struct AsyncReturn {
+	Async *state;
+	bool is_async;
+} AsyncReturn;
+
+extern void asyncInitInternal(void *_stack_base, const u8 threads);
+static inline void asyncInit(const u8 threads) // used to avoid stack offsets from call
 {
 	void *stack_base = NULL;
 	__asm__ __volatile__("mov %%rsp, %0" : "=r"(stack_base));
-	asyncInitInternal(stack_base);
+	asyncInitInternal(stack_base, threads);
 }
 
 extern void asyncDeinit(void);
-extern AsyncState *asyncCreateJob(void);
+extern AsyncReturn asyncCreateJob(void);
 extern bool asyncIsMainThread(void);
+extern void asyncCancel(Async *state);
+extern void asyncReset(Async *state);
 
 #define ASYNC(block) \
 do { \
 	assert(asyncIsMainThread()); \
-	AsyncState *state = asyncCreateJob(); \
-	if (state != NULL) { \
+	AsyncReturn ret = asyncCreateJob(); \
+	if (ret.is_async) { \
 		do { \
 			block \
 		} while (0); \
-		longjmp2(&state->loop); \
+		longjmp2(&ret.state->loop); \
 	} \
 } while (0)
 
-static inline void asyncAwait(AsyncState *state)
+#define ASYNC2(state, block) \
+do { \
+	assert(asyncIsMainThread()); \
+	AsyncReturn ret = asyncCreateJob(); \
+	if (ret.is_async) { \
+		do { \
+			block \
+		} while (0); \
+		longjmp2(&ret.state->loop); \
+	} \
+	(state) = ret.state; \
+} while (0)
+
+static inline void asyncAwait(Async *state)
 {
 	if (state == NULL) return;
-	void *unused;
-	pthread_join(state->id, &unused);
+	while (state->has_job) sleepu(1);
 }
 

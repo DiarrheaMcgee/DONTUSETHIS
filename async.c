@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -6,28 +7,33 @@
 
 #include "async.h"
 
-#define ASYNC_MAX_JOB_COUNT 32
-#define ASYNC_MAX_STACK_COUNT 4
-#define ASYNC_THREAD_COUNT 2
+#define ASYNC_DEFAULT_THREAD_COUNT 2
+#define ASYNC_MAX_THREAD_COUNT 8
+static u8 thread_count = ASYNC_DEFAULT_THREAD_COUNT;
 
 static u8 *stack_base;
 static pthread_mutex_t lock;
 static bool async_initialized;
-static AsyncState states[ASYNC_THREAD_COUNT];
+static Async states[ASYNC_MAX_THREAD_COUNT];
 static size_t thread_index;
+static pthread_t MAIN_THREAD;
 
 static void *threadloop(void *_state)
 {
-	AsyncState *state = _state;
+	Async *state = _state;
+	state->initialized = true;
 	if (setjmp2(&state->loop) != 0) {
 		pthread_mutex_lock(&lock);
-		free(state->stack);
+		if (state->stack != NULL)
+			free(state->stack);
+		state->stack = NULL;
 		state->has_job = false;
 		pthread_mutex_unlock(&lock);
 	}
 
 	while (true) {
 		if (state->should_exit) {
+			state->initialized = false;
 			pthread_exit(NULL);
 		}
 
@@ -42,18 +48,58 @@ static void *threadloop(void *_state)
 	return NULL;
 }
 
-static pthread_t MAIN_THREAD;
-
-void asyncInitInternal(void *_stack_base)
+void asyncInitInternal(void *_stack_base, const u8 threads)
 {
 	stack_base = _stack_base;
 	MAIN_THREAD = pthread_self();
 	pthread_mutex_init(&lock, NULL);
 	async_initialized = true;
 
-	for (int i = 0; i < ASYNC_THREAD_COUNT; i++) {
+	if (threads != 0) {
+		if (threads > ASYNC_MAX_THREAD_COUNT)
+			thread_count = ASYNC_MAX_THREAD_COUNT;
+		else
+			thread_count = threads;
+	}
+
+	for (int i = 0; i < thread_count; i++) {
 		pthread_create(&states[i].id, NULL, threadloop, states + i);
 	}
+}
+
+void asyncCancel(Async *state)
+{
+	if (!async_initialized || state == NULL) return;
+
+	state->should_exit = true;
+	sleepu(10);
+
+	if (!state->initialized) {
+		pthread_join(state->id, NULL);
+	}
+	else {
+		if (pthread_cancel(state->id) < 0)
+			pthread_kill(state->id, SIGKILL);
+		pthread_join(state->id, NULL);
+	}
+
+	pthread_mutex_lock(&lock);
+
+	if (state->has_job && state->stack != NULL)
+		free(state->stack);
+
+	state->id = 0;
+	state->has_job = false;
+	state->initialized = false;
+	state->stack = NULL;
+
+	pthread_mutex_unlock(&lock);
+}
+
+void asyncReset(Async *state)
+{
+	asyncCancel(state);
+	pthread_create(&state->id, NULL, threadloop, state);
 }
 
 bool asyncIsMainThread(void)
@@ -63,31 +109,31 @@ bool asyncIsMainThread(void)
 
 void asyncDeinit(void)
 {
-	for (int i = 0; i < ASYNC_THREAD_COUNT; i++) {
+	for (int i = 0; i < thread_count; i++) {
 		states[i].should_exit = true;
 	}
 
-	for (int i = 0; i < ASYNC_THREAD_COUNT; i++) {
-		void *ret;
-		pthread_join(states[i].id, &ret);
+	for (int i = 0; i < thread_count; i++) {
+		if (states[i].id != 0)
+			pthread_join(states[i].id, NULL);
 	}
 
 	pthread_mutex_destroy(&lock);
 	async_initialized = false;
 }
 
-AsyncState *asyncCreateJob(void)
+AsyncReturn asyncCreateJob(void)
 {
 	pthread_mutex_lock(&lock);
-	
+
 	ThreadState job;
 
 	while (states[thread_index].has_job) {
-		thread_index = (thread_index + 1) % ASYNC_THREAD_COUNT;
+		thread_index = (thread_index + 1) % thread_count;
 		sleepu(1);
 	}
 
-	AsyncState *state = &states[thread_index];
+	Async *state = &states[thread_index];
 
 	if (setjmp2(&job) == 0) {
 		void *rsp = job.rsp;
@@ -110,8 +156,15 @@ AsyncState *asyncCreateJob(void)
 
 		pthread_mutex_unlock(&lock);
 
-		return NULL;
+		AsyncReturn ret = {0};
+		ret.state = state;
+		ret.is_async = false;
+		return ret;
 	}
-	return state;
+
+	AsyncReturn ret = {0};
+	ret.state = state;
+	ret.is_async = true;
+	return ret;
 }
 
